@@ -29,8 +29,8 @@
 // Face Recognition takes upward from 15 seconds per frame on chips other than ESP32S3
 // Makes no sense to have it enabled for them
 #if CONFIG_IDF_TARGET_ESP32S3
-#define CONFIG_ESP_FACE_RECOGNITION_ENABLED 1
-#define CONFIG_ESP_FACE_DETECT_ENABLED      1
+#define CONFIG_ESP_FACE_RECOGNITION_ENABLED 0
+#define CONFIG_ESP_FACE_DETECT_ENABLED      0
 #else
 #define CONFIG_ESP_FACE_RECOGNITION_ENABLED 0
 #define CONFIG_ESP_FACE_DETECT_ENABLED      0
@@ -43,8 +43,8 @@
 #if CONFIG_ESP_FACE_DETECT_ENABLED
 
 #include <vector>
-#include "human_face_detect_msr01.hpp"
-#include "human_face_detect_mnp01.hpp"
+// #include "human_face_detect_msr01.hpp"
+// #include "human_face_detect_mnp01.hpp"
 
 #define TWO_STAGE 1 /*<! 1: detect by two-stage which is more accurate but slower(with keypoints). */
                     /*<! 0: detect by one-stage which is less accurate but faster(without keypoints). */
