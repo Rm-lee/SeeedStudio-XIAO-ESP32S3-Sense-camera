@@ -32,3 +32,6 @@
 *.app
 
 .vscode
+
+# WiFi credentials — never commit these
+secrets.h

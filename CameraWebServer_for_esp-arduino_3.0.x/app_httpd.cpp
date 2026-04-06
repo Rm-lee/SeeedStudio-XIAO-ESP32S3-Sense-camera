@@ -24,6 +24,8 @@
 #include "esp32-hal-log.h"
 #endif
 
+#include "mic_audio.h"
+
 // Face Detection will not work on boards without (or with disabled) PSRAM
 #ifdef BOARD_HAS_PSRAM
 // Face Recognition takes upward from 15 seconds per frame on chips other than ESP32S3
@@ -99,6 +101,7 @@ static const char *_STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %
 
 httpd_handle_t stream_httpd = NULL;
 httpd_handle_t camera_httpd = NULL;
+httpd_handle_t audio_httpd  = NULL;
 
 #if CONFIG_ESP_FACE_DETECT_ENABLED
 
@@ -1140,6 +1143,412 @@ static esp_err_t index_handler(httpd_req_t *req) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// /live  — combined camera + mic page (port 80)
+// ---------------------------------------------------------------------------
+// Raw string literal — must not contain the exact sequence )XHTML" inside.
+// Resolution enum from updated sensors.h (Arduino ESP32 3.x / esp32-camera):
+//   0=96x96  1=QQVGA  2=128x128  3=QCIF  4=HQVGA  5=240x240  6=QVGA
+//   7=320x320  8=CIF  9=HVGA  10=VGA  11=SVGA  12=XGA  13=HD  14=SXGA
+//   15=UXGA  16=FHD  17=P_HD  18=P_3MP  19=QXGA   (OV3660 max = 19)
+// Camera settings JS is a direct port of the original camera web server page:
+//   updateConfig / updateValue / .default-action wiring — no custom ctl() shim.
+static const char LIVE_PAGE[] = R"XHTML(
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>XIAO Cam</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0a0a14;color:#ccc;font-family:-apple-system,BlinkMacSystemFont,sans-serif;display:flex;height:100vh;overflow:hidden}
+#sb{width:272px;min-width:272px;background:#0c0c1a;border-right:1px solid #1e1e38;overflow-y:auto;transition:.2s;display:flex;flex-direction:column;flex-shrink:0}
+#sb.hide{width:36px;min-width:36px;overflow:hidden}
+#tb{position:sticky;top:0;background:#0c0c1a;border:none;color:#7ab;font-size:14px;padding:8px 10px;cursor:pointer;width:100%;text-align:right;border-bottom:1px solid #1e1e38;white-space:nowrap;z-index:1}
+#sb.hide #tb{text-align:center;padding:8px 0}
+#sbc{padding:5px}
+#sb.hide #sbc{display:none}
+.gh{background:#181830;color:#89b;padding:5px 8px;border-radius:4px;cursor:pointer;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;display:flex;justify-content:space-between;user-select:none;margin-top:4px}
+.gc{padding:2px 0 4px}
+.grp.off .gc{display:none}
+.cr{display:flex;align-items:center;gap:5px;padding:2px 2px}
+.cr label{width:90px;min-width:90px;color:#777;font-size:11px}
+.cr input[type=range]{flex:1;accent-color:#7ab;margin:0}
+.cr select{flex:1;background:#181830;color:#ccc;border:1px solid #2a2a50;border-radius:3px;padding:2px 3px;font-size:11px}
+.cr input[type=checkbox]{accent-color:#7ab;width:14px;height:14px}
+.vl{min-width:34px;text-align:right;color:#7ab;font-size:11px;flex-shrink:0}
+.hidden{display:none!important}
+#ab{width:100%;border:none;border-radius:5px;padding:6px;font-size:12px;font-weight:600;cursor:pointer;background:#2a5888;color:#fff;margin-bottom:2px}
+#ab.on{background:#1e6640}
+#ab:hover{filter:brightness(1.2)}
+#ast{font-size:10px;color:#555;padding:1px 2px;word-break:break-word;line-height:1.4}
+#main{flex:1;display:flex;align-items:center;justify-content:center;background:#000;overflow:hidden;min-width:0}
+#sw{position:relative;width:100%;height:100%;display:flex;align-items:center;justify-content:center}
+#stream{max-width:100%;max-height:100%;display:block;object-fit:contain}
+#fsb{position:absolute;bottom:10px;right:10px;background:rgba(0,0,0,.55);color:#ddd;border:1px solid rgba(255,255,255,.25);border-radius:5px;padding:5px 9px;cursor:pointer;font-size:15px;line-height:1;z-index:5;opacity:.75;transition:opacity .15s}
+#fsb:hover{opacity:1}
+#sw:-webkit-full-screen,#sw:fullscreen{background:#000;width:100vw;height:100vh}
+#sw:-webkit-full-screen #stream,#sw:fullscreen #stream{width:100vw;height:100vh;max-width:100vw;max-height:100vh;object-fit:contain}
+#sw:-webkit-full-screen #fsb,#sw:fullscreen #fsb{bottom:16px;right:16px}
+@media(max-width:600px){body{flex-direction:column;height:auto;overflow:auto}#sb{width:100%!important;min-width:0!important;border-right:none;border-bottom:1px solid #1e1e38;flex-shrink:0}#sb.hide{overflow:hidden;max-height:38px}#tb{text-align:left;padding:8px 12px}#main{min-height:55vw}}
+</style>
+</head>
+<body>
+<div id="sb">
+  <button id="tb" onclick="toggleSb()">&#9776; Settings</button>
+  <div id="sbc">
+
+    <div class="grp" id="g-aud">
+      <div class="gh" onclick="tg('aud')">&#127908; Microphone <span id="a-aud">&#9660;</span></div>
+      <div class="gc">
+        <div class="cr"><button id="ab" onclick="toggleAudio()">Enable Mic</button></div>
+        <div class="cr"><label>Volume</label><input type="range" id="vs" min="0" max="3" step="0.05" value="1" oninput="setVol(this.value);this.nextElementSibling.textContent=(+this.value).toFixed(1)"><span class="vl">1.0</span></div>
+        <div id="ast">Audio off</div>
+      </div>
+    </div>
+
+    <div class="grp" id="g-img">
+      <div class="gh" onclick="tg('img')">Image <span id="a-img">&#9660;</span></div>
+      <div class="gc">
+        <div class="cr"><label>Resolution</label>
+          <select id="framesize" class="default-action">
+            <option value="19">QXGA 2048&#xD7;1536</option>
+            <option value="18">P_3MP 864&#xD7;1536</option>
+            <option value="17">P_HD 720&#xD7;1280</option>
+            <option value="16">FHD 1920&#xD7;1080</option>
+            <option value="15">UXGA 1600&#xD7;1200</option>
+            <option value="14">SXGA 1280&#xD7;1024</option>
+            <option value="13">HD 1280&#xD7;720</option>
+            <option value="12">XGA 1024&#xD7;768</option>
+            <option value="11">SVGA 800&#xD7;600</option>
+            <option value="10">VGA 640&#xD7;480</option>
+            <option value="9">HVGA 480&#xD7;320</option>
+            <option value="8">CIF 400&#xD7;296</option>
+            <option value="7">320&#xD7;320</option>
+            <option value="6">QVGA 320&#xD7;240</option>
+            <option value="5">240&#xD7;240</option>
+            <option value="4">HQVGA 240&#xD7;176</option>
+            <option value="3">QCIF 176&#xD7;144</option>
+            <option value="2">128&#xD7;128</option>
+            <option value="1">QQVGA 160&#xD7;120</option>
+            <option value="0">96&#xD7;96</option>
+          </select>
+        </div>
+        <div class="cr"><label>Quality</label><input type="range" id="quality" min="4" max="63" class="default-action" oninput="this.nextElementSibling.textContent=this.value"><span class="vl">-</span></div>
+        <div class="cr"><label>Brightness</label><input type="range" id="brightness" min="-3" max="3" class="default-action" oninput="this.nextElementSibling.textContent=this.value"><span class="vl">-</span></div>
+        <div class="cr"><label>Contrast</label><input type="range" id="contrast" min="-3" max="3" class="default-action" oninput="this.nextElementSibling.textContent=this.value"><span class="vl">-</span></div>
+        <div class="cr"><label>Saturation</label><input type="range" id="saturation" min="-4" max="4" class="default-action" oninput="this.nextElementSibling.textContent=this.value"><span class="vl">-</span></div>
+        <div class="cr"><label>Effect</label>
+          <select id="special_effect" class="default-action">
+            <option value="0">None</option><option value="1">Negative</option>
+            <option value="2">Grayscale</option><option value="3">Red Tint</option>
+            <option value="4">Green Tint</option><option value="5">Blue Tint</option>
+            <option value="6">Sepia</option>
+          </select>
+        </div>
+        <div class="cr"><label>H-Mirror</label><input type="checkbox" id="hmirror" class="default-action"></div>
+        <div class="cr"><label>V-Flip</label><input type="checkbox" id="vflip" class="default-action"></div>
+        <div class="cr"><label>Colorbar</label><input type="checkbox" id="colorbar" class="default-action"></div>
+      </div>
+    </div>
+
+    <div class="grp off" id="g-ae">
+      <div class="gh" onclick="tg('ae')">Exposure / Gain <span id="a-ae">&#9650;</span></div>
+      <div class="gc">
+        <div class="cr"><label>AWB</label><input type="checkbox" id="awb" class="default-action"></div>
+        <div class="cr"><label>AWB Gain</label><input type="checkbox" id="awb_gain" class="default-action"></div>
+        <div class="cr hidden" id="wb_mode-group"><label>WB Mode</label>
+          <select id="wb_mode" class="default-action">
+            <option value="0">Auto</option><option value="1">Sunny</option>
+            <option value="2">Cloudy</option><option value="3">Office</option>
+            <option value="4">Home</option>
+          </select>
+        </div>
+        <div class="cr"><label>AEC Sensor</label><input type="checkbox" id="aec" class="default-action"></div>
+        <div class="cr"><label>AEC DSP</label><input type="checkbox" id="aec2" class="default-action"></div>
+        <div class="cr"><label>AE Level</label><input type="range" id="ae_level" min="-2" max="2" class="default-action" oninput="this.nextElementSibling.textContent=this.value"><span class="vl">-</span></div>
+        <div class="cr" id="aec_value-group"><label>Exposure</label><input type="range" id="aec_value" min="0" max="1200" class="default-action" oninput="this.nextElementSibling.textContent=this.value"><span class="vl">-</span></div>
+        <div class="cr"><label>AGC</label><input type="checkbox" id="agc" class="default-action"></div>
+        <div class="cr" id="agc_gain-group"><label>AGC Gain</label><input type="range" id="agc_gain" min="0" max="30" class="default-action" oninput="this.nextElementSibling.textContent=this.value"><span class="vl">-</span></div>
+        <div class="cr"><label>Gain Ceiling</label>
+          <select id="gainceiling" class="default-action">
+            <option value="0">2x</option><option value="1">4x</option><option value="2">8x</option>
+            <option value="3">16x</option><option value="4">32x</option><option value="5">64x</option>
+            <option value="6">128x</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="grp off" id="g-fx">
+      <div class="gh" onclick="tg('fx')">Filters <span id="a-fx">&#9650;</span></div>
+      <div class="gc">
+        <div class="cr"><label>BPC</label><input type="checkbox" id="bpc" class="default-action"></div>
+        <div class="cr"><label>WPC</label><input type="checkbox" id="wpc" class="default-action"></div>
+        <div class="cr"><label>Raw GMA</label><input type="checkbox" id="raw_gma" class="default-action"></div>
+        <div class="cr"><label>Lens Corr</label><input type="checkbox" id="lenc" class="default-action"></div>
+        <div class="cr"><label>DCW</label><input type="checkbox" id="dcw" class="default-action"></div>
+      </div>
+    </div>
+
+    <div class="grp off" id="g-led">
+      <div class="gh" onclick="tg('led')">LED Flash <span id="a-led">&#9650;</span></div>
+      <div class="gc">
+        <div class="cr"><label>Intensity</label><input type="range" id="led_intensity" min="0" max="255" class="default-action" oninput="this.nextElementSibling.textContent=this.value"><span class="vl">-</span></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div id="main">
+  <div id="sw">
+    <img id="stream" src="" alt="Connecting...">
+    <button id="fsb" onclick="goFs()" title="Fullscreen">&#x26F6;</button>
+  </div>
+</div>
+
+<script>
+const H=location.hostname;
+const SURL='http://'+H+':81/stream';
+document.getElementById('stream').src=SURL;
+
+if(window.innerWidth<600)document.getElementById('sb').classList.add('hide');
+
+function toggleSb(){document.getElementById('sb').classList.toggle('hide')}
+
+const grpOpen={aud:true,img:true,ae:false,fx:false,led:false};
+function tg(n){
+  grpOpen[n]=!grpOpen[n];
+  document.getElementById('g-'+n).classList.toggle('off');
+  document.getElementById('a-'+n).innerHTML=grpOpen[n]?'&#9660;':'&#9650;';
+}
+
+// --- Camera settings: direct port of original camera web server JS ---
+const hide=el=>el.classList.add('hidden');
+const show=el=>el.classList.remove('hidden');
+
+function updateConfig(el){
+  let value;
+  switch(el.type){
+    case 'checkbox': value=el.checked?1:0; break;
+    case 'range': case 'select-one': value=el.value; break;
+    default: return;
+  }
+  fetch('/control?var='+el.id+'&val='+value).catch(()=>{});
+}
+
+const updateValue=(el,value,updateRemote)=>{
+  updateRemote=updateRemote==null?true:updateRemote;
+  let init;
+  if(el.type==='checkbox'){
+    init=el.checked; value=!!value; el.checked=value;
+  } else {
+    init=el.value; el.value=value;
+    // update display span immediately after the input
+    const d=el.nextElementSibling;
+    if(d&&d.classList&&d.classList.contains('vl')) d.textContent=value;
+  }
+  if(updateRemote&&init!==value){
+    updateConfig(el);
+  } else if(!updateRemote){
+    const expG=document.getElementById('aec_value-group');
+    const agcG=document.getElementById('agc_gain-group');
+    const wbG =document.getElementById('wb_mode-group');
+    if(el.id==='aec'){ value?hide(expG):show(expG); }
+    else if(el.id==='agc'){ value?hide(agcG):show(agcG); }
+    else if(el.id==='awb_gain'){ value?show(wbG):hide(wbG); }
+  }
+};
+
+// Wire all .default-action elements: onchange → updateConfig
+document.querySelectorAll('.default-action').forEach(el=>{
+  el.onchange=()=>updateConfig(el);
+});
+
+// Custom overrides (must come after generic wiring above to take effect)
+const aecEl=document.getElementById('aec');
+aecEl.onchange=()=>{
+  updateConfig(aecEl);
+  const expG=document.getElementById('aec_value-group');
+  aecEl.checked?hide(expG):show(expG);
+};
+
+const agcEl=document.getElementById('agc');
+agcEl.onchange=()=>{
+  updateConfig(agcEl);
+  const agcG=document.getElementById('agc_gain-group');
+  agcEl.checked?hide(agcG):show(agcG);
+};
+
+const awbGainEl=document.getElementById('awb_gain');
+awbGainEl.onchange=()=>{
+  updateConfig(awbGainEl);
+  const wbG=document.getElementById('wb_mode-group');
+  awbGainEl.checked?show(wbG):hide(wbG);
+};
+
+// Resolution: send control then restart stream so camera pipeline resets cleanly
+const framesizeEl=document.getElementById('framesize');
+framesizeEl.onchange=()=>{
+  const img=document.getElementById('stream');
+  img.src='';
+  fetch('/control?var=framesize&val='+framesizeEl.value)
+    .finally(()=>setTimeout(()=>{img.src=SURL;},500));
+};
+
+// Populate all controls from /status (same pattern as original page)
+fetch('/status').then(r=>r.json()).then(state=>{
+  document.querySelectorAll('.default-action').forEach(el=>{
+    const v=state[el.id];
+    if(v===undefined) return;
+    if(el.id==='led_intensity'&&v<0) return; // LED not available on this build
+    updateValue(el,v,false);
+  });
+}).catch(()=>{});
+
+// Fullscreen — toggle enter/exit
+function goFs(){
+  const fs=!!(document.fullscreenElement||document.webkitFullscreenElement);
+  if(fs){
+    (document.exitFullscreen||document.webkitExitFullscreen||document.mozCancelFullScreen||document.msExitFullscreen||function(){}).call(document);
+  } else {
+    const el=document.getElementById('sw');
+    (el.requestFullscreen||el.webkitRequestFullscreen||el.mozRequestFullScreen||el.msRequestFullscreen||function(){}).call(el);
+  }
+}
+['fullscreenchange','webkitfullscreenchange'].forEach(e=>
+  document.addEventListener(e,()=>{
+    const fs=!!(document.fullscreenElement||document.webkitFullscreenElement);
+    document.getElementById('fsb').innerHTML=fs?'&#x2715;':'&#x26F6;';
+  })
+);
+
+// ---- Audio — pop-fix pipeline ----
+// 1. BiquadFilter highpass @80 Hz strips PDM mic DC offset (primary pop cause)
+// 2. Fixed 4096-sample windows prevent TCP chunk-size jitter
+// 3. 64-sample linear crossfade at buffer edges removes click discontinuities
+const PSAMP=4096,FADE=64;
+let ctx=null,hpf=null,gain=null,rdr=null,audioOn=false,nxt=0;
+let raw=new Uint8Array(PSAMP*2),rawLen=0;
+
+function setVol(v){if(gain)gain.gain.value=+v}
+async function toggleAudio(){audioOn?stopAudio():await startAudio()}
+
+async function startAudio(){
+  document.getElementById('ast').textContent='Connecting...';
+  try{
+    ctx=new(window.AudioContext||window.webkitAudioContext)({sampleRate:16000});
+    await ctx.resume();
+    hpf=ctx.createBiquadFilter();
+    hpf.type='highpass';hpf.frequency.value=80;hpf.Q.value=0.707;
+    gain=ctx.createGain();
+    gain.gain.value=+document.getElementById('vs').value;
+    hpf.connect(gain);gain.connect(ctx.destination);
+    const resp=await fetch('http://'+H+':82/audio');
+    if(!resp.ok)throw new Error('HTTP '+resp.status);
+    rdr=resp.body.getReader();
+    audioOn=true;nxt=0;rawLen=0;
+    document.getElementById('ab').innerHTML='&#128263; Disable Mic';
+    document.getElementById('ab').className='on';
+    document.getElementById('ast').textContent='Streaming 16kHz mono';
+    pump();
+  }catch(e){
+    document.getElementById('ast').textContent='Error: '+e.message;
+    cleanAudio();
+  }
+}
+
+function schedBuf(){
+  const buf=ctx.createBuffer(1,PSAMP,16000);
+  const ch=buf.getChannelData(0);
+  for(let i=0;i<PSAMP;i++){
+    const lo=raw[i*2],hi=raw[i*2+1];
+    let s=((hi<<8|lo)<<16>>16)/32768;
+    const f=Math.min(i,PSAMP-1-i,FADE);
+    if(f<FADE)s*=f/FADE;
+    ch[i]=s;
+  }
+  const src=ctx.createBufferSource();
+  src.buffer=buf;src.connect(hpf);
+  const now=ctx.currentTime;
+  if(nxt<now+0.04)nxt=now+0.12;
+  src.start(nxt);nxt+=buf.duration;
+}
+
+async function pump(){
+  while(audioOn){
+    let res;try{res=await rdr.read()}catch{break}
+    if(res.done)break;
+    const d=res.value;
+    if(!d||!d.length)continue;
+    for(let i=0;i<d.length;i++){
+      raw[rawLen++]=d[i];
+      if(rawLen>=PSAMP*2){schedBuf();rawLen=0;}
+    }
+  }
+  if(audioOn)document.getElementById('ast').textContent='Stream ended';
+}
+
+function stopAudio(){
+  audioOn=false;
+  if(rdr){rdr.cancel();rdr=null;}
+  cleanAudio();
+  document.getElementById('ab').innerHTML='Enable Mic';
+  document.getElementById('ab').className='';
+  document.getElementById('ast').textContent='Audio off';
+}
+function cleanAudio(){
+  if(ctx){ctx.close().catch(()=>{});ctx=null;hpf=null;gain=null;}
+  rawLen=0;
+}
+</script>
+</body>
+</html>
+)XHTML";
+
+static esp_err_t live_handler(httpd_req_t *req) {
+  httpd_resp_set_type(req, "text/html");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  return httpd_resp_send(req, LIVE_PAGE, (ssize_t)strlen(LIVE_PAGE));
+}
+
+// ---------------------------------------------------------------------------
+// /audio  — raw 16-bit signed PCM stream at 16 kHz, mono (port 82)
+// ---------------------------------------------------------------------------
+// 2048 bytes = 1024 int16 samples ≈ 64 ms at 16 kHz.
+// Larger reads → fewer TCP frames → less jitter at the browser accumulator.
+#define AUDIO_BUF_BYTES 2048
+
+static esp_err_t audio_handler(httpd_req_t *req) {
+  httpd_resp_set_type(req, "application/octet-stream");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+  httpd_resp_set_hdr(req, "X-Audio-Format", "pcm-s16le");
+  httpd_resp_set_hdr(req, "X-Audio-Sample-Rate", "16000");
+  httpd_resp_set_hdr(req, "X-Audio-Channels", "1");
+
+  // Heap-allocated: the default httpd task stack (4 KB) cannot hold a
+  // 2048-byte local array plus call overhead without overflowing.
+  uint8_t *buf = (uint8_t *)malloc(AUDIO_BUF_BYTES);
+  if (!buf) {
+    return httpd_resp_send_500(req);
+  }
+
+  size_t bytesRead = 0;
+  esp_err_t res = ESP_OK;
+
+  while (res == ESP_OK) {
+    if (readMicSamples(buf, AUDIO_BUF_BYTES, &bytesRead) && bytesRead > 0) {
+      res = httpd_resp_send_chunk(req, (const char *)buf, (ssize_t)bytesRead);
+    }
+  }
+  free(buf);
+  httpd_resp_send_chunk(req, NULL, 0);
+  return ESP_OK;
+}
+
 void startCameraServer() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.max_uri_handlers = 16;
@@ -1295,6 +1704,20 @@ void startCameraServer() {
   // load ids from flash partition
   recognizer.set_ids_from_flash();
 #endif
+  // /live handler — combined camera+mic viewer page
+  httpd_uri_t live_uri = {
+    .uri     = "/live",
+    .method  = HTTP_GET,
+    .handler = live_handler,
+    .user_ctx = NULL
+#ifdef CONFIG_HTTPD_WS_SUPPORT
+    ,
+    .is_websocket = true,
+    .handle_ws_control_frames = false,
+    .supported_subprotocol = NULL
+#endif
+  };
+
   log_i("Starting web server on port: '%d'", config.server_port);
   if (httpd_start(&camera_httpd, &config) == ESP_OK) {
     httpd_register_uri_handler(camera_httpd, &index_uri);
@@ -1308,6 +1731,9 @@ void startCameraServer() {
     httpd_register_uri_handler(camera_httpd, &greg_uri);
     httpd_register_uri_handler(camera_httpd, &pll_uri);
     httpd_register_uri_handler(camera_httpd, &win_uri);
+
+    httpd_register_uri_handler(camera_httpd, &live_uri);
+    log_i("Combined viewer at http://<ip>/live");
   }
 
   config.server_port += 1;
@@ -1315,6 +1741,32 @@ void startCameraServer() {
   log_i("Starting stream server on port: '%d'", config.server_port);
   if (httpd_start(&stream_httpd, &config) == ESP_OK) {
     httpd_register_uri_handler(stream_httpd, &stream_uri);
+  }
+
+  // Dedicated audio server on port 82 — long-running PCM stream stays off the
+  // control server so camera controls always remain responsive.
+  httpd_uri_t audio_uri = {
+    .uri     = "/audio",
+    .method  = HTTP_GET,
+    .handler = audio_handler,
+    .user_ctx = NULL
+#ifdef CONFIG_HTTPD_WS_SUPPORT
+    ,
+    .is_websocket = true,
+    .handle_ws_control_frames = false,
+    .supported_subprotocol = NULL
+#endif
+  };
+
+  httpd_config_t audio_cfg = HTTPD_DEFAULT_CONFIG();
+  audio_cfg.server_port      = 82;
+  audio_cfg.ctrl_port        = 32770;  // must be unique across all httpd instances
+  audio_cfg.stack_size       = 8192;   // default 4096 too small for streaming handler
+  audio_cfg.max_uri_handlers = 2;
+  log_i("Starting audio server on port: '%d'", audio_cfg.server_port);
+  if (httpd_start(&audio_httpd, &audio_cfg) == ESP_OK) {
+    httpd_register_uri_handler(audio_httpd, &audio_uri);
+    log_i("Raw PCM audio stream at http://<ip>:82/audio");
   }
 }
 

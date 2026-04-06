@@ -1,5 +1,6 @@
 #include "esp_camera.h"
 #include <WiFi.h>
+#include "mic_audio.h"
 
 //
 // WARNING!!! PSRAM IC required for UXGA resolution and high JPEG quality
@@ -19,8 +20,9 @@
 // ===========================
 // Enter your WiFi credentials
 // ===========================
-const char *ssid = "**********";
-const char *password = "**********";
+// Copy secrets.h.example → secrets.h and fill in your SSID/password.
+// secrets.h is listed in .gitignore so it will never be committed.
+#include "secrets.h"
 
 void startCameraServer();
 void setupLedFlash(int pin);
@@ -126,11 +128,16 @@ void setup() {
   Serial.println("");
   Serial.println("WiFi connected");
 
+  initMic();
+
   startCameraServer();
 
   Serial.print("Camera Ready! Use 'http://");
   Serial.print(WiFi.localIP());
   Serial.println("' to connect");
+  Serial.print("Camera + Mic viewer: 'http://");
+  Serial.print(WiFi.localIP());
+  Serial.println("/live'");
 }
 
 void loop() {
