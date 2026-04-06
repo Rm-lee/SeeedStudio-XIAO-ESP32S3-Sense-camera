@@ -46,6 +46,12 @@ WiFi credentials are kept in a gitignored file so they are never committed.
 | `http://<ip>:81/stream` | Raw MJPEG stream |
 | `http://<ip>:82/audio` | Raw 16 kHz mono PCM audio stream |
 
+### Screenshots (Mobile)
+
+| Settings open | Settings collapsed | Fullscreen |
+|---|---|---|
+| ![Settings sidebar open on mobile](CameraWebServer_for_esp-arduino_3.0.x/screenshots/live-settings-open.png) | ![Settings collapsed, video maximized](CameraWebServer_for_esp-arduino_3.0.x/screenshots/live-settings-collapsed.png) | ![Fullscreen video with exit button](CameraWebServer_for_esp-arduino_3.0.x/screenshots/live-fullscreen.png) |
+
 ### Files Changed / Added
 
 | File | Change |
