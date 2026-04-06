@@ -1,3 +1,64 @@
+# XIAO ESP32S3 Sense — Camera + Microphone Web Server
+
+> **This fork adds live microphone audio streaming to the `CameraWebServer_for_esp-arduino_3.0.x` project.**
+> The original upstream README follows below the modifications section.
+
+---
+
+## What Was Added (`CameraWebServer_for_esp-arduino_3.0.x`)
+
+The original camera web server streams video only. This fork extends it with:
+
+- **PDM microphone driver** (`mic_audio.h` / `mic_audio.cpp`) — uses the ESP-IDF 5.x I2S PDM RX API to read from the XIAO ESP32S3 Sense onboard mic (GPIO 42 CLK, GPIO 41 DAT) at 16 kHz mono 16-bit PCM.
+- **`/live` page** — a dark-themed combined viewer served at `http://<ip>/live` that shows the MJPEG video stream and lets you enable the microphone audio in the same browser tab.
+- **Collapsible settings sidebar** — all the same camera controls as the original page (`/`), using the exact same `updateConfig` / `updateValue` JavaScript logic ported directly from the original page so all controls work identically.
+- **Corrected resolution enum** — `framesize` values updated to match the `sensors.h` enum in Arduino ESP32 3.x (adds `128×128` at value 2 and `320×320` at value 7, correcting UXGA→15, QXGA→19 for OV3660).
+- **Fullscreen toggle** — button on the video area enters and exits fullscreen, works on mobile.
+- **Audio pop-fix pipeline** — browser-side Web Audio API processing: highpass filter at 80 Hz (removes PDM DC offset), fixed 4096-sample windows (prevents TCP chunk jitter), and a 64-sample linear crossfade at buffer edges.
+
+### Arduino IDE Settings
+
+| Setting | Value |
+|---|---|
+| Board | XIAO ESP32S3 |
+| PSRAM | OPI PSRAM |
+| Partition Scheme | Default with SPIFFS (3MB APP / 1.5MB SPIFFS) |
+| Arduino ESP32 version | 3.0.x |
+
+### WiFi Setup
+
+WiFi credentials are kept in a gitignored file so they are never committed.
+
+1. Copy the template:
+   ```
+   CameraWebServer_for_esp-arduino_3.0.x/secrets.h.example
+     → CameraWebServer_for_esp-arduino_3.0.x/secrets.h
+   ```
+2. Fill in your SSID and password in `secrets.h`.
+3. `secrets.h` is already listed in `.gitignore` and will never be pushed.
+
+### URLs After Flashing
+
+| URL | Description |
+|---|---|
+| `http://<ip>/` | Original camera settings page |
+| `http://<ip>/live` | Combined video + microphone page (this fork) |
+| `http://<ip>:81/stream` | Raw MJPEG stream |
+| `http://<ip>:82/audio` | Raw 16 kHz mono PCM audio stream |
+
+### Files Changed / Added
+
+| File | Change |
+|---|---|
+| `mic_audio.h` | New — PDM mic declarations |
+| `mic_audio.cpp` | New — I2S PDM RX driver implementation |
+| `app_httpd.cpp` | Modified — added `/live` page handler, `/audio` streaming handler, third httpd instance on port 82 |
+| `CameraWebServer_for_esp-arduino_3.0.x.ino` | Modified — added `initMic()` call, `#include "secrets.h"` |
+| `secrets.h.example` | New — WiFi credentials template |
+| `.gitignore` | Modified — added `secrets.h` |
+
+---
+
 # Camera Usage in Seeed Studio XIAO ESP32S3 Sense
 
 :::tip
